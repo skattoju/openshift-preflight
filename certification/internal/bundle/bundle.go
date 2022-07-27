@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	v1 "k8s.io/api/rbac/v1"
+
 	"github.com/blang/semver"
 	operatorv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/certification/internal/operatorsdk"
@@ -210,4 +212,71 @@ func GetSupportedInstallModes(ctx context.Context, csvReader io.Reader) (map[str
 		}
 	}
 	return installedModes, nil
+}
+
+func ExtractImagesFromBundle(ctx context.Context, csvReader io.Reader) ([]string, error) {
+	csvBytes, err := io.ReadAll(csvReader)
+	if err != nil {
+		return nil, fmt.Errorf("could not read CSV from path: %v", err)
+	}
+
+	var csv operatorv1alpha1.ClusterServiceVersion
+	if err := yaml.Unmarshal(csvBytes, &csv); err != nil {
+		return nil, fmt.Errorf("could not unmarshal CSV: %v", err)
+	}
+
+	imageMap := make(map[string]struct{}, len(csv.Spec.RelatedImages))
+	// This will trim down any duplicates
+	for _, v := range csv.Spec.RelatedImages {
+		imageMap[v.Image] = struct{}{}
+	}
+
+	for _, deployment := range csv.Spec.InstallStrategy.StrategySpec.DeploymentSpecs {
+		for _, container := range deployment.Spec.Template.Spec.Containers {
+			imageMap[container.Image] = struct{}{}
+		}
+	}
+	images := make([]string, 0, len(imageMap))
+	for k := range imageMap {
+		images = append(images, k)
+	}
+	return images, nil
+}
+
+func GetSecurityContextConstraints(ctx context.Context, csvReader io.Reader) ([]string, error) {
+	var csv operatorv1alpha1.ClusterServiceVersion
+	bts, err := io.ReadAll(csvReader)
+	if err != nil {
+		return nil, fmt.Errorf("could not get CSV from reader: %v", err)
+	}
+	err = yaml.Unmarshal(bts, &csv)
+	if err != nil {
+		return nil, fmt.Errorf("malformed CSV detected: %v", err)
+	}
+	for _, cp := range csv.Spec.InstallStrategy.StrategySpec.ClusterPermissions {
+		for _, rule := range cp.Rules {
+			if hasSCCApiGroup(rule) && hasSCCResource(rule) {
+				return rule.ResourceNames, nil
+			}
+		}
+	}
+	return nil, nil
+}
+
+func hasSCCApiGroup(rule v1.PolicyRule) bool {
+	for _, apiGroup := range rule.APIGroups {
+		if apiGroup == "security.openshift.io" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSCCResource(rule v1.PolicyRule) bool {
+	for _, resource := range rule.Resources {
+		if resource == "securitycontextconstraints" {
+			return true
+		}
+	}
+	return false
 }
